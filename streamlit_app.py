@@ -212,13 +212,18 @@ def retriever_agent(state):
 
 
 def web_agent(state):
+    # The result-count kwarg is max_results, not k — and because the failure is
+    # swallowed below, passing the wrong name made web search look like it had
+    # simply found nothing. Surface the error in `steps` instead of hiding it.
     try:
-        tavily = TavilySearchResults(k=3)
+        tavily = TavilySearchResults(max_results=3)
         hits = tavily.invoke({"query": state["question"]})
-        texts = [h["content"] for h in hits]
-    except Exception:
+        texts = [h["content"] for h in hits if isinstance(h, dict) and "content" in h]
+        step = "web"
+    except Exception as e:
         texts = []
-    return {"documents": state["documents"] + texts, "steps": state["steps"] + ["web"]}
+        step = f"web(xato: {type(e).__name__})"
+    return {"documents": state["documents"] + texts, "steps": state["steps"] + [step]}
 
 
 def generate(state):
