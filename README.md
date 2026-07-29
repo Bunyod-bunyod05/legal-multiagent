@@ -2,7 +2,7 @@
 
 Supervisor + Retriever + Web (Tavily) + Code (penya/jarima hisoblovchi) agentlar.
 
-Barcha Gemini chaqiruvlari (LLM + embeddings) ustozning LiteLLM proksisi
+Barcha Gemini chaqiruvlari (LLM + embeddings)  LiteLLM proksi
 orqali o'tadi (`https://saidazam-litellm-proxy.hf.space`), haqiqiy Google
 serverlariga to'g'ridan-to'g'ri so'rov ketmaydi.
 
