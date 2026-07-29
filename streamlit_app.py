@@ -11,13 +11,13 @@ Code agents). All Gemini calls go through the instructor's LiteLLM
 proxy, never directly to Google.
 
 Expects `civil_code.pdf` to be present in the same directory (part of
-the GitHub repo) — ingested once per app session (cached).
+the GitHub repo) — ingested lazily on the first question (cached).
 """
 import os
 import re
 import io
 import contextlib
-import signal
+import threading
 from typing import TypedDict, List, Optional
 
 import streamlit as st
@@ -28,6 +28,13 @@ from langchain_core.documents import Document
 from langchain_qdrant import QdrantVectorStore
 from langchain_community.tools.tavily_search import TavilySearchResults
 from langgraph.graph import StateGraph, END
+
+# ---------------------------------------------------------------------------
+# set_page_config MUST be the very first Streamlit call in the script — any
+# earlier st.* element (even a cache spinner) makes it raise
+# StreamlitAPIException, which crashed the app on every cold boot.
+# ---------------------------------------------------------------------------
+st.set_page_config(page_title="Multi-Agent Legal Analyst", page_icon="⚖️")
 
 # ---------------------------------------------------------------------------
 # Config — reads from Streamlit Cloud "Secrets" (st.secrets) when deployed,
@@ -69,11 +76,10 @@ def get_llms_and_embeddings():
     return llm_flash, llm_lite, embeddings
 
 
-llm_flash, llm_lite, embeddings = get_llms_and_embeddings()
-
-
 # ---------------------------------------------------------------------------
 # Ingest — cached so it only runs once per app session, not per question.
+# Called lazily from the agent nodes so a cold boot paints the UI straight
+# away instead of embedding the whole code before the first byte of HTML.
 # ---------------------------------------------------------------------------
 def load_pdf_text(path: str) -> str:
     doc = fitz.open(path)
@@ -96,6 +102,7 @@ def legal_chunk(full_text: str) -> List[dict]:
 
 @st.cache_resource(show_spinner="Fuqarolik kodeksi ingest qilinmoqda (faqat birinchi so'rovda)...")
 def get_retriever():
+    _, _, embeddings = get_llms_and_embeddings()
     full_text = load_pdf_text(PDF_PATH)
     articles = legal_chunk(full_text)
     docs = [Document(page_content=a["text"], metadata={"article": a["article"]}) for a in articles]
@@ -103,9 +110,6 @@ def get_retriever():
         docs, embeddings, location=":memory:", collection_name="civil_code"
     )
     return vectorstore.as_retriever(search_kwargs={"k": 4}), len(docs)
-
-
-retriever, n_articles = get_retriever()
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +129,7 @@ class Route(BaseModel):
 
 
 def supervisor(state):
+    llm_flash, _, _ = get_llms_and_embeddings()
     prompt = f"""Savol: {state['question']}
 Hozirgacha bajarilgan qadamlar: {state['steps']}
 Hozirgacha yig'ilgan ma'lumot: hujjatlar={bool(state['documents'])}, kod natijasi={state['code_result']}
@@ -145,12 +150,12 @@ def route_after_supervisor(state):
 
 
 def run_sandboxed_code(code_str: str, timeout_sec: int = 5) -> str:
-    class TimeoutErr(Exception):
-        pass
+    """Run the generated arithmetic in a restricted namespace, with a time cap.
 
-    def _handler(signum, frame):
-        raise TimeoutErr("Vaqt limitidan oshdi")
-
+    Uses a worker thread rather than signal.alarm: Streamlit runs the script
+    in a ScriptRunner thread, and signal.signal() off the main thread raises
+    ValueError (SIGALRM also does not exist on Windows for local runs).
+    """
     allowed_builtins = {
         "print": print, "range": range, "len": len, "round": round,
         "abs": abs, "min": min, "max": max, "sum": sum,
@@ -158,22 +163,28 @@ def run_sandboxed_code(code_str: str, timeout_sec: int = 5) -> str:
     }
     safe_globals = {"__builtins__": allowed_builtins}
     buf = io.StringIO()
+    box = {}
 
-    signal.signal(signal.SIGALRM, _handler)
-    signal.alarm(timeout_sec)
-    try:
-        with contextlib.redirect_stdout(buf):
-            exec(code_str, safe_globals, {})
-    except TimeoutErr as e:
-        return f"XATOLIK: {e}"
-    except Exception as e:
-        return f"XATOLIK: {type(e).__name__}: {e}"
-    finally:
-        signal.alarm(0)
+    def _runner():
+        try:
+            with contextlib.redirect_stdout(buf):
+                exec(code_str, safe_globals, {})
+        except Exception as e:
+            box["error"] = f"XATOLIK: {type(e).__name__}: {e}"
+
+    worker = threading.Thread(target=_runner, daemon=True)
+    worker.start()
+    worker.join(timeout_sec)
+
+    if worker.is_alive():
+        return "XATOLIK: Vaqt limitidan oshdi"
+    if "error" in box:
+        return box["error"]
     return buf.getvalue().strip()
 
 
 def code_agent(state):
+    _, llm_lite, _ = get_llms_and_embeddings()
     prompt = f"""Quyidagi savol uchun Python kodi yoz — hisob-kitobni bajarib,
 print() orqali natijani chiqar. Faqat oddiy arifmetika ishlat (import kerak emas).
 
@@ -191,6 +202,7 @@ Faqat Python kodini qaytar, boshqa izoh yozma."""
 
 
 def retriever_agent(state):
+    retriever, _ = get_retriever()
     hits = retriever.invoke(state["question"])
     texts = [f"[{d.metadata.get('article')}] {d.page_content}" for d in hits]
     return {"documents": state["documents"] + texts, "steps": state["steps"] + ["retriever"]}
@@ -207,6 +219,7 @@ def web_agent(state):
 
 
 def generate(state):
+    _, llm_lite, _ = get_llms_and_embeddings()
     context = "\n\n".join(state["documents"]) if state["documents"] else "(hujjat topilmadi)"
     code_part = f"\nHisoblash natijasi: {state['code_result']}" if state["code_result"] else ""
     prompt = f"""Savol: {state['question']}
@@ -240,17 +253,13 @@ def build_graph():
     return g.compile()
 
 
-app_graph = build_graph()
-
-
 # ---------------------------------------------------------------------------
 # Streamlit UI
 # ---------------------------------------------------------------------------
-st.set_page_config(page_title="Multi-Agent Legal Analyst", page_icon="⚖️")
 st.title("⚖️ Multi-Agent Legal Analyst")
 st.caption(
-    f"Supervisor + Retriever + Web + Code agentlar · Fuqarolik kodeksi ({n_articles} ta modda) "
-    "ustida ishlaydi. Barcha LLM chaqiruvlari proksi orqali."
+    "Supervisor + Retriever + Web + Code agentlar · Fuqarolik kodeksi ustida ishlaydi. "
+    "Barcha LLM chaqiruvlari proksi orqali."
 )
 
 if "history" not in st.session_state:
@@ -271,7 +280,7 @@ if question:
 
     with st.chat_message("assistant"):
         with st.spinner("Qidirilmoqda..."):
-            result = app_graph.invoke(
+            result = build_graph().invoke(
                 {
                     "question": question, "plan": "", "documents": [],
                     "code_result": None, "answer": "", "steps": [],
