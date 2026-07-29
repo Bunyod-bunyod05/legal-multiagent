@@ -64,8 +64,11 @@ if not GEMINI_API_KEY:
 
 @st.cache_resource(show_spinner=False)
 def get_llms_and_embeddings():
+    # The proxy key is scoped to ['flash-lite', 'gemini-flash-lite', 'gemini-embedding'].
+    # Asking for "gemini-flash" comes back as 403 key_model_access_denied, which
+    # killed the supervisor node — the graph's entry point — on every question.
     llm_flash = ChatOpenAI(
-        base_url=PROXY_BASE_URL, api_key=GEMINI_API_KEY, model="gemini-flash", temperature=0,
+        base_url=PROXY_BASE_URL, api_key=GEMINI_API_KEY, model="gemini-flash-lite", temperature=0,
     )
     llm_lite = ChatOpenAI(
         base_url=PROXY_BASE_URL, api_key=GEMINI_API_KEY, model="gemini-flash-lite", temperature=0,
