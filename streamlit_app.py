@@ -100,8 +100,14 @@ def get_llms_and_embeddings():
 # ---------------------------------------------------------------------------
 
 
-@st.cache_resource(show_spinner="Fuqarolik kodeksi tayyorlanmoqda...")
+@st.cache_resource(show_spinner="Fuqarolik kodeksi tayyorlanmoqda (1- va 2-qism)...")
 def get_retriever():
+    # CORPUS_BUILD is part of this function's body on purpose: st.cache_resource
+    # keys on the decorated function's own code, so fixes inside civil_code.py
+    # do not invalidate a previously cached (and possibly broken) corpus. Bump it
+    # whenever the corpus or its parsing changes.
+    CORPUS_BUILD = 2
+    _ = CORPUS_BUILD
     _, _, embeddings = get_llms_and_embeddings()
 
     # Chunking is local (no API calls) and the exact-article lookup needs the
@@ -248,7 +254,7 @@ Faqat Python kodini qaytar, boshqa izoh yozma."""
 
 
 def retriever_agent(state):
-    retriever, by_key, _ = get_retriever()
+    retriever, by_key, n_articles = get_retriever()
     texts, cited = [], []
 
     # An explicit "239-modda" is a lookup, not a similarity problem: cosine
@@ -267,10 +273,13 @@ def retriever_agent(state):
         texts.append(f"[{label}] {d.page_content}")
         cited.append(label)
 
+    # Carry the corpus size into the visible trace: an empty or half-loaded
+    # corpus otherwise looks identical to a question the code simply does not
+    # cover, which is exactly how the missing-PDF bug stayed invisible.
     return {
         "documents": state["documents"] + texts,
         "citations": state["citations"] + cited,
-        "steps": state["steps"] + ["retriever"],
+        "steps": state["steps"] + [f"retriever({n_articles} modda, {len(cited)} topildi)"],
     }
 
 
