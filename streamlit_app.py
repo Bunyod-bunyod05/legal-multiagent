@@ -7,27 +7,36 @@ paid (PRO) plan; only Static Spaces remain free. Streamlit Community
 Cloud is still genuinely free for public apps as of 2026.
 
 Same graph logic as the Colab notebook (Supervisor + Retriever + Web +
-Code agents). All Gemini calls go through the instructor's LiteLLM
+Code agents). All Gemini calls go through the LiteLLM
 proxy, never directly to Google.
 
 Expects `civil_code.pdf` to be present in the same directory (part of
 the GitHub repo) — ingested lazily on the first question (cached).
 """
 import os
-import re
 import io
 import contextlib
 import threading
 from typing import TypedDict, List, Optional
 
 import streamlit as st
-import fitz
 from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_core.documents import Document
 from langchain_qdrant import QdrantVectorStore
 from langchain_community.tools.tavily_search import TavilySearchResults
 from langgraph.graph import StateGraph, END
+from qdrant_client import QdrantClient, models
+
+from civil_code import (
+    COLLECTION_NAME,
+    EMBED_BATCH,
+    EMBED_MODEL,
+    PROXY_BASE_URL,
+    VECTOR_SIZE,
+    article_keys_in,
+    embed_corpus,
+    load_articles,
+)
 
 # ---------------------------------------------------------------------------
 # set_page_config MUST be the very first Streamlit call in the script — any
@@ -54,8 +63,11 @@ GEMINI_API_KEY = _get_secret("GEMINI_API_KEY")
 TAVILY_API_KEY = _get_secret("TAVILY_API_KEY")
 os.environ["TAVILY_API_KEY"] = TAVILY_API_KEY
 
-PROXY_BASE_URL = "https://saidazam-litellm-proxy.hf.space/v1"
-PDF_PATH = os.path.join(os.path.dirname(__file__), "civil_code.pdf")
+# When a managed Qdrant is configured the corpus is embedded once by ingest.py
+# and the app only queries it. Without these the app falls back to embedding
+# every article in memory on each cold boot, which is ~1200 articles per wake.
+QDRANT_URL = _get_secret("QDRANT_URL")
+QDRANT_API_KEY = _get_secret("QDRANT_API_KEY")
 
 if not GEMINI_API_KEY:
     st.error("GEMINI_API_KEY topilmadi. Streamlit Cloud'da Settings → Secrets bo'limiga qo'shing.")
@@ -73,46 +85,76 @@ def get_llms_and_embeddings():
     llm_lite = ChatOpenAI(
         base_url=PROXY_BASE_URL, api_key=GEMINI_API_KEY, model="gemini-flash-lite", temperature=0,
     )
+    # chunk_size must stay at or below Gemini's 100-input batch limit — see
+    # EMBED_BATCH. The library default of 1000 fails with a 400 and then retries.
     embeddings = OpenAIEmbeddings(
-        base_url=PROXY_BASE_URL, api_key=GEMINI_API_KEY, model="gemini-embedding",
+        base_url=PROXY_BASE_URL, api_key=GEMINI_API_KEY, model=EMBED_MODEL,
+        chunk_size=EMBED_BATCH,
     )
     return llm_flash, llm_lite, embeddings
 
 
 # ---------------------------------------------------------------------------
-# Ingest — cached so it only runs once per app session, not per question.
-# Called lazily from the agent nodes so a cold boot paints the UI straight
-# away instead of embedding the whole code before the first byte of HTML.
+# Retrieval — cached so the corpus is prepared once per app session, and pulled
+# lazily from the agent nodes so a cold boot paints the UI straight away.
 # ---------------------------------------------------------------------------
-def load_pdf_text(path: str) -> str:
-    doc = fitz.open(path)
-    text = ""
-    for page in doc:
-        text += page.get_text() + "\n"
-    return text
 
 
-def legal_chunk(full_text: str) -> List[dict]:
-    pattern = re.compile(r"\b(\d+)\s*-\s*modda\s*\.")
-    hits = list(pattern.finditer(full_text))
-    chunks = []
-    for i, m in enumerate(hits):
-        start = m.start()
-        end = hits[i + 1].start() if i + 1 < len(hits) else len(full_text)
-        chunks.append({"article": f"{m.group(1)}-modda", "text": full_text[start:end].strip()})
-    return chunks
-
-
-@st.cache_resource(show_spinner="Fuqarolik kodeksi ingest qilinmoqda (faqat birinchi so'rovda)...")
+@st.cache_resource(show_spinner="Fuqarolik kodeksi tayyorlanmoqda...")
 def get_retriever():
     _, _, embeddings = get_llms_and_embeddings()
-    full_text = load_pdf_text(PDF_PATH)
-    articles = legal_chunk(full_text)
-    docs = [Document(page_content=a["text"], metadata={"article": a["article"]}) for a in articles]
-    vectorstore = QdrantVectorStore.from_documents(
-        docs, embeddings, location=":memory:", collection_name="civil_code"
+
+    # Chunking is local (no API calls) and the exact-article lookup needs the
+    # full texts anyway, so it runs in both modes.
+    articles = load_articles()
+    by_key = {a["key"]: a for a in articles}
+
+    # ~1200 articles across both parts, so k=4 left too little context for the
+    # generator to reason across neighbouring articles.
+    search_kwargs = {"k": 6}
+
+    if QDRANT_URL:
+        # Corpus was embedded once by ingest.py; only the query is embedded here.
+        store = QdrantVectorStore.from_existing_collection(
+            collection_name=COLLECTION_NAME,
+            embedding=embeddings,
+            url=QDRANT_URL,
+            api_key=QDRANT_API_KEY or None,
+        )
+        return store.as_retriever(search_kwargs=search_kwargs), by_key, len(articles)
+
+    # No managed Qdrant: embed the corpus into an in-memory collection. Doing it
+    # through QdrantVectorStore.from_documents() would serialise the batches and
+    # take ~6 minutes on both parts, so embed concurrently and upsert the vectors
+    # directly. Payload keys match QdrantVectorStore's defaults so queries work.
+    vectors = embed_corpus([a["text"] for a in articles], GEMINI_API_KEY)
+    client = QdrantClient(location=":memory:")
+    client.create_collection(
+        COLLECTION_NAME,
+        vectors_config=models.VectorParams(
+            size=VECTOR_SIZE, distance=models.Distance.COSINE
+        ),
     )
-    return vectorstore.as_retriever(search_kwargs={"k": 4}), len(docs)
+    client.upsert(
+        COLLECTION_NAME,
+        points=[
+            models.PointStruct(
+                id=i,
+                vector=vector,
+                payload={
+                    "page_content": a["text"],
+                    "metadata": {
+                        "article": a["article"], "key": a["key"], "part": a["part"],
+                    },
+                },
+            )
+            for i, (a, vector) in enumerate(zip(articles, vectors))
+        ],
+    )
+    store = QdrantVectorStore(
+        client=client, collection_name=COLLECTION_NAME, embedding=embeddings
+    )
+    return store.as_retriever(search_kwargs=search_kwargs), by_key, len(articles)
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +167,7 @@ class AgentState(TypedDict):
     code_result: Optional[str]
     answer: str
     steps: List[str]
+    citations: List[str]
 
 
 class Route(BaseModel):
@@ -205,25 +248,51 @@ Faqat Python kodini qaytar, boshqa izoh yozma."""
 
 
 def retriever_agent(state):
-    retriever, _ = get_retriever()
-    hits = retriever.invoke(state["question"])
-    texts = [f"[{d.metadata.get('article')}] {d.page_content}" for d in hits]
-    return {"documents": state["documents"] + texts, "steps": state["steps"] + ["retriever"]}
+    retriever, by_key, _ = get_retriever()
+    texts, cited = [], []
+
+    # An explicit "239-modda" is a lookup, not a similarity problem: cosine
+    # search over hundreds of near-identical legal paragraphs frequently ranks
+    # the requested article below its neighbours. Resolve it exactly first.
+    for key in article_keys_in(state["question"]):
+        art = by_key.get(key)
+        if art and art["article"] not in cited:
+            texts.append(f"[{art['article']}] {art['text']}")
+            cited.append(art["article"])
+
+    for d in retriever.invoke(state["question"]):
+        label = d.metadata.get("article")
+        if label in cited:
+            continue
+        texts.append(f"[{label}] {d.page_content}")
+        cited.append(label)
+
+    return {
+        "documents": state["documents"] + texts,
+        "citations": state["citations"] + cited,
+        "steps": state["steps"] + ["retriever"],
+    }
 
 
 def web_agent(state):
     # The result-count kwarg is max_results, not k — and because the failure is
     # swallowed below, passing the wrong name made web search look like it had
     # simply found nothing. Surface the error in `steps` instead of hiding it.
+    cited = []
     try:
         tavily = TavilySearchResults(max_results=3)
         hits = tavily.invoke({"query": state["question"]})
         texts = [h["content"] for h in hits if isinstance(h, dict) and "content" in h]
+        cited = [h["url"] for h in hits if isinstance(h, dict) and h.get("url")]
         step = "web"
     except Exception as e:
         texts = []
         step = f"web(xato: {type(e).__name__})"
-    return {"documents": state["documents"] + texts, "steps": state["steps"] + [step]}
+    return {
+        "documents": state["documents"] + texts,
+        "citations": state["citations"] + cited,
+        "steps": state["steps"] + [step],
+    }
 
 
 def generate(state):
@@ -266,19 +335,26 @@ def build_graph():
 # ---------------------------------------------------------------------------
 st.title("⚖️ Multi-Agent Legal Analyst")
 st.caption(
-    "Supervisor + Retriever + Web + Code agentlar · Fuqarolik kodeksi ustida ishlaydi. "
-    "Barcha LLM chaqiruvlari proksi orqali."
+    "Supervisor + Retriever + Web + Code agentlar · Fuqarolik kodeksining "
+    "1- va 2-qismi (~1200 modda) ustida ishlaydi. Barcha LLM chaqiruvlari proksi orqali."
 )
 
 if "history" not in st.session_state:
     st.session_state.history = []
 
+
+def render_turn(turn):
+    st.write(turn["answer"])
+    if turn.get("citations"):
+        st.caption("Manbalar: " + " · ".join(turn["citations"]))
+    st.caption("Bosqichlar: " + " → ".join(turn["steps"]))
+
+
 for turn in st.session_state.history:
     with st.chat_message("user"):
         st.write(turn["question"])
     with st.chat_message("assistant"):
-        st.write(turn["answer"])
-        st.caption("Bosqichlar: " + " → ".join(turn["steps"]))
+        render_turn(turn)
 
 question = st.chat_input("Savolingizni yozing (masalan: 239-modda nima haqida?)")
 
@@ -291,13 +367,19 @@ if question:
             result = build_graph().invoke(
                 {
                     "question": question, "plan": "", "documents": [],
-                    "code_result": None, "answer": "", "steps": [],
+                    "code_result": None, "answer": "", "steps": [], "citations": [],
                 },
                 {"recursion_limit": 15},
             )
-        st.write(result["answer"])
-        st.caption("Bosqichlar: " + " → ".join(result["steps"]))
+        turn = {
+            "question": question, "answer": result["answer"],
+            "steps": result["steps"], "citations": result.get("citations", []),
+        }
+        render_turn(turn)
 
-    st.session_state.history.append({
-        "question": question, "answer": result["answer"], "steps": result["steps"],
-    })
+    st.session_state.history.append(turn)
+
+st.caption(
+    "⚠️ Bu vosita huquqiy ma'lumot beradi, yuridik maslahat emas. "
+    "Muhim qarorlar uchun advokatga murojaat qiling."
+)

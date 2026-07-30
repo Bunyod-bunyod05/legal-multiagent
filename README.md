@@ -30,7 +30,45 @@ faolsizlikdan keyin "uxlaydi" — keyingi so'rovda avtomatik uyg'onadi).
 ## Fayllar
 
 - `streamlit_app.py` — asosiy ilova (graf + UI) — **shu fayl ishlatiladi**
+- `civil_code.py` — PDF'ni moddalarga bo'lish va embedding (ilova ham,
+  `ingest.py` ham shundan foydalanadi)
+- `ingest.py` — bir martalik skript: kodeksni Qdrant Cloud'ga yuklaydi
 - `app.py` — Gradio versiyasi (HF Spaces pullik bo'lib qolgani uchun
   hozircha ishlatilmaydi, keyinchalik kerak bo'lsa saqlanmoqda)
-- `civil_code.pdf` — Fuqarolik kodeksi (1-qism), ishga tushganda ingest qilinadi
+- `civil_code.pdf` — Fuqarolik kodeksi, **1-qism** (386 modda)
+- `civil_code_2.pdf` — Fuqarolik kodeksi, **2-qism** (811 modda)
 - `requirements.txt`
+
+## Moddalarni ajratish haqida
+
+Kodeksda tahrirlar bilan kiritilgan moddalar yuqori indeks bilan yuriladi:
+26¹, 173⁷, 358¹, 1140¹ va hokazo (jami 17 ta). PDF'dan oddiy matn olinsa
+ular "261", "1737", "3581" ga tekislanadi — natijada 26¹ haqiqiy 261-modda
+(neustoyka shakllari) bilan bir yorliq ostiga tushib qoladi. Shuning uchun
+`civil_code.py` matnni span-ma-span o'qib, PyMuPDF'ning superscript bitidan
+(`span["flags"] & 1`) foydalanadi va har moddaga `26-1` ko'rinishidagi
+normal kalit beradi. Foydalanuvchi `26¹`, `26-1` yoki `261` deb yozsa ham
+to'g'ri modda topiladi.
+
+## Sovuq boshlanish va Qdrant
+
+Kalitlar berilmasa ilova butun kodeksni har uyg'onishda xotiraga embed
+qiladi (~1200 modda, ~75 sekund). Embedding paketlari parallel yuboriladi:
+Gemini'ning `BatchEmbedContents` limiti 100, langchain'ning `chunk_size`
+defaulti esa 1000 — u shu hajmda 400 xatosi beradi, shuning uchun
+`EMBED_BATCH` aniq belgilangan.
+
+Buni butunlay yo'q qilish uchun boshqariladigan Qdrant ulanadi:
+
+```
+python ingest.py            # bir marta, GEMINI_API_KEY + QDRANT_URL bilan
+```
+
+so'ng Secrets'ga qo'shiladi:
+
+```
+QDRANT_URL = "https://xxxx.cloud.qdrant.io:6333"
+QDRANT_API_KEY = "..."
+```
+
+Shundan keyin ilova korpusni embed qilmaydi, faqat savolni embed qiladi.
