@@ -1,3 +1,8 @@
+# Streamlit Cloud runs Python 3.14, so every pin here has to have a cp314 wheel.
+# The floors are not cosmetic:
+#   pymupdf < 1.28          - no cp314 wheel, falls back to building MuPDF
+#   langchain < 0.3.25      - pulls numpy<2, and numpy 1.x has no cp314 wheel
+#   langchain-community < 0.3.26 - same numpy<2 constraint
 streamlit
 langchain>=0.3.27,<0.4
 langchain-openai>=0.2.14,<0.4

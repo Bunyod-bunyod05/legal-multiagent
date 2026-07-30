@@ -320,8 +320,15 @@ Agar hisoblash natijasi bo'lsa, uni javobga aniq kiritib ko'rsat."""
     return {"answer": answer, "steps": state["steps"] + ["generate"]}
 
 
-@st.cache_resource(show_spinner=False)
 def build_graph():
+    """Compile the agent graph.
+
+    Deliberately not cached: compiling is microseconds, while a cached graph
+    pins the node function objects from whichever script run created it. When
+    only a node's code changes, Streamlit keeps handing back the old graph and
+    the edit silently never takes effect — which is exactly how two rounds of
+    fixes here appeared to do nothing.
+    """
     g = StateGraph(AgentState)
     g.add_node("supervisor", supervisor)
     g.add_node("retriever", retriever_agent)
