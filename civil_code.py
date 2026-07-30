@@ -87,14 +87,34 @@ def legal_chunk(full_text: str) -> List[dict]:
 
 
 def load_articles() -> List[dict]:
-    """Chunk every Civil Code part that is present, tagging each with its part."""
+    """Chunk every Civil Code part that is present, tagging each with its part.
+
+    Raises rather than returning a short list: silently skipping a missing or
+    unparsable PDF produced an app that answered "bu haqda ma'lumot yo'q" to
+    every question, with nothing anywhere saying the corpus was empty.
+    """
     articles = []
+    notes = []
     for part, path in PDF_PARTS:
+        name = os.path.basename(path)
         if not os.path.exists(path):
+            notes.append(f"{name}: fayl topilmadi")
             continue
-        for a in legal_chunk(load_pdf_text(path)):
+        found = legal_chunk(load_pdf_text(path))
+        if not found:
+            notes.append(f"{name}: matn o'qildi, lekin modda topilmadi")
+            continue
+        for a in found:
             a["part"] = part
             articles.append(a)
+
+    if not articles:
+        listing = ", ".join(sorted(os.listdir(BASE_DIR))) if os.path.isdir(BASE_DIR) else "(yo'q)"
+        raise RuntimeError(
+            "Fuqarolik kodeksi yuklanmadi. "
+            + "; ".join(notes)
+            + f" | BASE_DIR={BASE_DIR} | mavjud fayllar: {listing}"
+        )
     return articles
 
 
