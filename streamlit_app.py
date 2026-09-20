@@ -57,7 +57,7 @@ def _get_secret(name: str) -> str:
 
 
 OPENROUTER_API_KEY = _get_secret("OPENROUTER_API_KEY")
-OPENROUTER_MODEL = _get_secret("OPENROUTER_MODEL") or "meta-llama/llama-3.3-70b-instruct:free"
+OPENROUTER_MODEL = _get_secret("OPENROUTER_MODEL") or "deepseek/deepseek-chat-v3.1:free"
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
 TAVILY_API_KEY = _get_secret("TAVILY_API_KEY")
