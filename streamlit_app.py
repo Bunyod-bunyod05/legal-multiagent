@@ -75,7 +75,7 @@ OPENROUTER_MODELS = [
     ).split(",") if m.strip()
 ]
 # Per-request timeout (seconds). Slow/hung models roll to the next in chain.
-LLM_TIMEOUT = int(_get_secret("LLM_TIMEOUT") or "30")
+LLM_TIMEOUT = int(_get_secret("LLM_TIMEOUT") or "20")
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
 TAVILY_API_KEY = _get_secret("TAVILY_API_KEY")
@@ -95,11 +95,18 @@ except Exception:
 
 if not (GROQ_API_KEY or OPENROUTER_API_KEY):
     st.error(
-        "GROQ_API_KEY yoki OPENROUTER_API_KEY topilmadi. "
-        "Bepul Groq kaliti: https://console.groq.com/keys — Streamlit Cloud "
-        "Settings → Secrets bo'limiga qo'shing."
+        "🔑 **GROQ_API_KEY topilmadi.** Bepul kalit oling: "
+        "https://console.groq.com/keys (30 soniyada, Google/GitHub bilan sign up). "
+        "Keyin Streamlit Cloud → Manage app → Settings → Secrets bo'limiga "
+        "`GROQ_API_KEY = \"gsk_...\"` deb qo'shing va Reboot bosing."
     )
     st.stop()
+
+if not GROQ_API_KEY:
+    st.warning(
+        "⚠️ Faqat OpenRouter ishlatilmoqda — bepul modellar sekin/uzilib qoladi. "
+        "Groq (https://console.groq.com/keys) qo'shsangiz sezilarli tezlashadi."
+    )
 
 
 class ResilientLLM:
