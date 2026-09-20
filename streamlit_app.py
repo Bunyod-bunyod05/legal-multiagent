@@ -67,8 +67,10 @@ OPENROUTER_API_KEY = _get_secret("OPENROUTER_API_KEY")
 OPENROUTER_MODELS = [
     m.strip() for m in (
         _get_secret("OPENROUTER_MODEL")
-        or "deepseek/deepseek-chat-v3.1:free,google/gemini-2.0-flash-exp:free,"
-           "qwen/qwen-2.5-72b-instruct:free,mistralai/mistral-small-3.2-24b-instruct:free"
+        or "nvidia/nemotron-3-ultra-550b-a55b:free,"
+           "nvidia/nemotron-nano-9b-v2:free,"
+           "deepseek/deepseek-chat-v3.1:free,"
+           "google/gemini-2.0-flash-exp:free"
     ).split(",") if m.strip()
 ]
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
