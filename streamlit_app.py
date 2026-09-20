@@ -77,14 +77,18 @@ if not GEMINI_API_KEY:
 def get_llms_and_embeddings():
     # Direct Gemini API — no proxy needed. gemini-2.0-flash-lite is free-tier
     # friendly and fast enough for both supervisor routing and generation.
+    # transport="rest" because Streamlit Cloud blocks gRPC.
     llm_flash = ChatGoogleGenerativeAI(
-        google_api_key=GEMINI_API_KEY, model="gemini-2.0-flash-lite", temperature=0,
+        google_api_key=GEMINI_API_KEY, model="gemini-2.0-flash-lite",
+        temperature=0, transport="rest",
     )
     llm_lite = ChatGoogleGenerativeAI(
-        google_api_key=GEMINI_API_KEY, model="gemini-2.0-flash-lite", temperature=0,
+        google_api_key=GEMINI_API_KEY, model="gemini-2.0-flash-lite",
+        temperature=0, transport="rest",
     )
     embeddings = GoogleGenerativeAIEmbeddings(
         google_api_key=GEMINI_API_KEY, model=EMBED_MODEL,
+        transport="rest",
     )
     return llm_flash, llm_lite, embeddings
 
