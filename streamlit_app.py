@@ -133,7 +133,7 @@ class ResilientLLM:
                     api_key=OPENROUTER_API_KEY, base_url=OPENROUTER_BASE,
                     model=m, temperature=0, timeout=LLM_TIMEOUT, max_retries=1,
                     default_headers={
-                        "HTTP-Referer": "https://legal-multiagent.streamlit.app",
+                        "HTTP-Referer": "https://bperro.streamlit.app",
                         "X-Title": "Multi-Agent Legal Analyst",
                     },
                 )))
@@ -170,7 +170,7 @@ def get_retriever():
     _, _, embeddings = get_llms_and_embeddings()
     articles = load_articles()
     by_key = {a["key"]: a for a in articles}
-    search_kwargs = {"k": 6}
+    search_kwargs = {"k": 10}
 
     if QDRANT_URL:
         # Persistent: kolleksiya ingest.py orqali BIR MARTA yuklanadi.
@@ -333,20 +333,63 @@ Faqat Python kodini qaytar."""
     return {"code_result": result, "steps": state["steps"] + ["code"]}
 
 
+def _rewrite_query_for_retrieval(question: str, llm) -> str:
+    """Turn a lay question into legal search keywords for the vector index."""
+    prompt = f"""Foydalanuvchi savolini O'zbekiston Fuqarolik kodeksi bo'yicha
+qidirish uchun kalit so'zlarga aylantir. Faqat qidiruv uchun kalit so'zlarni
+yoz — izohsiz, sonsiz, jumlasiz. Huquqiy institut nomlari, shartnoma turlari,
+kodeks tushunchalarini keltir.
+
+Misol:
+Savol: "Do'kondan kartoshka oldim, chek bermadi."
+Kalit so'zlar: chakana savdo shartnomasi, kassa cheki, savdo hujjati, iste'molchi huquqlari, sotuvchi majburiyatlari
+
+Misol:
+Savol: "Uy sotayotgan edim, xaridor puldan qochyapti."
+Kalit so'zlar: xarid-sotuv shartnomasi, ko'chmas mulk, majburiyatni bajarmaslik, penya, sudga da'vo
+
+Savol: "{question}"
+Kalit so'zlar:"""
+    try:
+        raw = llm.invoke(prompt).content.strip()
+        if raw and len(raw) < 400:
+            return raw
+    except Exception:
+        pass
+    return question
+
+
 def retriever_agent(state):
     retriever, by_key, n_articles = get_retriever()
+    llm, _, _ = get_llms_and_embeddings()
     texts, cited = [], []
+
+    # Exact "N-modda" lookup — always try first.
     for key in article_keys_in(state["question"]):
         art = by_key.get(key)
         if art and art["article"] not in cited:
             texts.append(f"[{art['article']}] {art['text']}")
             cited.append(art["article"])
-    for d in retriever.invoke(state["question"]):
-        label = d.metadata.get("article")
-        if label in cited:
-            continue
-        texts.append(f"[{label}] {d.page_content}")
-        cited.append(label)
+
+    # Vector search over BOTH the raw question and a legal-keyword rewrite.
+    # Users often ask in everyday Uzbek ("chek bermadi", "kartoshka oldim");
+    # embedding those directly ranks unrelated articles because the shared
+    # vocabulary with the code is thin. A rewrite into "chakana savdo
+    # shartnomasi, kassa cheki, iste'molchi huquqlari" lands on the right ones.
+    queries = [state["question"]]
+    if (state.get("difficulty") or "orta") != "oson":
+        rewritten = _rewrite_query_for_retrieval(state["question"], llm)
+        if rewritten and rewritten != state["question"]:
+            queries.append(rewritten)
+
+    for q in queries:
+        for d in retriever.invoke(q):
+            label = d.metadata.get("article")
+            if label in cited:
+                continue
+            texts.append(f"[{label}] {d.page_content}")
+            cited.append(label)
+
     return {
         "documents": state["documents"] + texts,
         "citations": state["citations"] + cited,
@@ -390,13 +433,31 @@ def generate(state):
                  "modda raqamini havola qil.")
 
     prompt = f"""Sen O'zbekiston fuqarolik huquqi va fuqarolik protsessual huquqi
-bo'yicha yordamchisan. FAQAT quyidagi kontekst asosida javob ber.
+bo'yicha yordamchisan. Foydalanuvchining real amaliy holatiga foydali javob
+berish — asosiy vazifang.
 
 Savol: {state['question']}
 
-Kontekst:
+Kontekst (moddadan olib berilgan matnlar, mos yoki mos emas bo'lishi mumkin):
 {context}
 {code_part}
+
+QOIDALAR:
+1. Avval savolga TO'G'RIDAN-TO'G'RI javob ber — foydalanuvchi shifokorga
+   emas, hayotiy muammoga yechim izlab keladi. "Kontekstda yo'q" deb qo'l
+   siltama.
+2. Kontekstdagi mos MODDA bo'lsa — uni tanla va raqamiga havola qilib
+   izohla (masalan: "FK 434-modda bo'yicha…"). Nomos moddalarni tashlab yubor.
+3. Kontekst muammoni to'liq qamramasa — O'zbekiston fuqarolik huquqidagi
+   umumiy tamoyillar (masalan, chakana savdo shartnomasi, iste'molchi
+   huquqlari) asosida javob ber, lekin aniq modda raqamini AYTMA agar
+   ishonchli bilmasang. "FK ning tegishli moddasi bo'yicha…" deb yoz.
+4. Foydalanuvchi qanday harakat qilishi mumkinligini ayt (masalan: shikoyat
+   arizasi, sudga da'vo, qaysi organga murojaat).
+5. Agar masala Fuqarolik kodeksidan tashqari qonunlarga (masalan,
+   "Iste'molchi huquqlarini himoya qilish to'g'risida"gi qonun,
+   "Kassoviy apparatlar…" qonuni) ham tegishli bo'lsa — buni oddiy
+   tilda ayt, foydalanuvchi qayerga qarashi kerakligini ko'rsat.
 
 Javob uslubi: {style}
 Hisoblash natijasi bo'lsa, uni javobga aniq kiritib ko'rsat."""
