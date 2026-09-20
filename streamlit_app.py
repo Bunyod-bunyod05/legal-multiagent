@@ -185,15 +185,24 @@ def supervisor(state):
 Hozirgacha bajarilgan qadamlar: {state['steps']}
 Hozirgacha yig'ilgan ma'lumot: hujjatlar={bool(state['documents'])}, kod natijasi={state['code_result']}
 
-Qaysi agent keyingi navbatda ishlashi kerak?
-- 'retriever': agar savol Fuqarolik kodeksi moddasi haqida bo'lsa
-- 'code': agar savol hisob-kitob (penya, jarima, foiz, summalar) talab qilsa
-- 'web': agar savol kodeksda yo'q, internetdan qidirish kerak bo'lsa
-- 'finish': agar javob uchun yetarli ma'lumot yig'ilgan bo'lsa
+Qaysi agent keyingi navbatda ishlashi kerak? Faqat bitta so'z bilan javob ber:
+- retriever: agar savol Fuqarolik kodeksi moddasi haqida bo'lsa
+- code: agar savol hisob-kitob (penya, jarima, foiz, summalar) talab qilsa
+- web: agar savol kodeksda yo'q, internetdan qidirish kerak bo'lsa
+- finish: agar javob uchun yetarli ma'lumot yig'ilgan bo'lsa
 
-Bir marta 'code'/'retriever'/'web' ishlatilgan bo'lsa, qayta ishlatma — 'finish' deb qaytar."""
-    result = llm_flash.with_structured_output(Route).invoke(prompt)
-    return {"plan": result.next, "steps": state["steps"] + [f"supervisor→{result.next}"]}
+Bir marta 'code'/'retriever'/'web' ishlatilgan bo'lsa, qayta ishlatma — 'finish' deb qaytar.
+Javob: faqat bitta so'z (retriever, code, web yoki finish)."""
+    # Plain text output instead of with_structured_output — Gemini's tool-calling
+    # schema for a Pydantic Route(next: str) trips a 400 BadRequest through
+    # langchain-google-genai, so parse the model's own word out of a text reply.
+    raw = llm_flash.invoke(prompt).content.strip().lower()
+    plan = "finish"
+    for keyword in ("retriever", "code", "web", "finish"):
+        if keyword in raw:
+            plan = keyword
+            break
+    return {"plan": plan, "steps": state["steps"] + [f"supervisor→{plan}"]}
 
 
 def route_after_supervisor(state):
