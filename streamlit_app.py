@@ -41,7 +41,12 @@ from civil_code import (
 # ---------------------------------------------------------------------------
 # set_page_config must be the very first Streamlit call.
 # ---------------------------------------------------------------------------
-st.set_page_config(page_title="Multi-Agent Legal Analyst", page_icon="⚖️", layout="wide")
+st.set_page_config(
+    page_title="Multi-Agent Legal Analyst",
+    page_icon="⚖️",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -494,6 +499,93 @@ if "history" not in st.session_state:
 
 
 # ---------------------------------------------------------------------------
+# Free-tier rate limit (per-device via localStorage)
+# ---------------------------------------------------------------------------
+FREE_LIMIT = int(_get_secret("FREE_LIMIT") or "5")
+ADMIN_EMAIL = _get_secret("ADMIN_EMAIL") or "bunyodpanjiyev48@gmail.com"
+_ACCESS_CODES = {c.strip() for c in (_get_secret("ACCESS_CODES") or "").split(",") if c.strip()}
+_COUNTER_KEY = "legal_request_count_v1"
+_UNLOCK_KEY = "legal_unlocked_v1"
+
+
+def get_usage_count() -> int:
+    if not _LS_OK:
+        return st.session_state.get("_req_count", 0)
+    try:
+        return int(_LS.getItem(_COUNTER_KEY) or "0")
+    except Exception:
+        return 0
+
+
+def is_unlocked() -> bool:
+    if not _LS_OK:
+        return st.session_state.get("_unlocked", False)
+    try:
+        return _LS.getItem(_UNLOCK_KEY) == "true"
+    except Exception:
+        return False
+
+
+def increment_usage() -> None:
+    n = get_usage_count() + 1
+    if _LS_OK:
+        try:
+            _LS.setItem(_COUNTER_KEY, str(n))
+            return
+        except Exception:
+            pass
+    st.session_state["_req_count"] = n
+
+
+def try_unlock(code: str) -> bool:
+    if code and code in _ACCESS_CODES:
+        if _LS_OK:
+            try:
+                _LS.setItem(_UNLOCK_KEY, "true")
+            except Exception:
+                pass
+        st.session_state["_unlocked"] = True
+        return True
+    return False
+
+
+def _mailto(subject: str) -> str:
+    from urllib.parse import quote
+    return f"mailto:{ADMIN_EMAIL}?subject={quote(subject)}"
+
+
+def render_paywall(context: str) -> None:
+    """Show a signup block. Returns nothing; caller must st.stop() after."""
+    st.warning(
+        f"🔒 **Bepul chegara tugadi** ({FREE_LIMIT} so'rov). Cheksiz foydalanish "
+        f"uchun ro'yxatdan o'ting."
+    )
+    _subject = "Legal-Multiagent — kirish kodini so'rayman"
+    st.markdown(
+        f"**Ro'yxatdan o'tish:** [{ADMIN_EMAIL}]({_mailto(_subject)}) "
+        "ga xat yozing, sizga kirish kodi yuboriladi."
+    )
+    with st.form(f"unlock_{context}"):
+        code = st.text_input("Kirish kodi", type="password", placeholder="Sizga yuborilgan kod…")
+        if st.form_submit_button("🔓 Ochish", type="primary"):
+            if try_unlock(code.strip()):
+                st.success("Kod qabul qilindi. Endi cheksiz foydalanishingiz mumkin.")
+                st.rerun()
+            else:
+                st.error("Kod noto'g'ri yoki eskirgan.")
+
+
+def rate_limit_gate(context: str) -> bool:
+    """Return True if request is allowed. If not, render paywall."""
+    if is_unlocked():
+        return True
+    if get_usage_count() < FREE_LIMIT:
+        return True
+    render_paywall(context)
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Extra tools: contract analysis, penya calculator
 # ---------------------------------------------------------------------------
 def extract_pdf_text(file_bytes: bytes) -> str:
@@ -563,29 +655,33 @@ def calc_penya(summa: float, daily_pct: float, days: int) -> dict:
 # ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
-st.title("⚖️ Multi-Agent Legal Analyst")
-st.caption(
-    "Fuqarolik huquqi va fuqarolik protsessual huquqi bo'yicha yordamchi · "
-    "Supervisor + Retriever + Web + Code agentlar · FK 1- va 2-qismi (~1200 modda)."
-)
+_title_col, _hist_col = st.columns([6, 1])
+with _title_col:
+    st.title("⚖️ Xush kelibsiz!")
+    st.caption("Sizga qanday yordam bera olaman?")
+with _hist_col:
+    st.markdown("&nbsp;")  # vertical spacer to align with title
+    with st.popover("📋 Tarix", use_container_width=True):
+        if st.session_state.history:
+            st.caption(f"{len(st.session_state.history)} ta suhbat — telefon xotirasida.")
+            for i, t in enumerate(reversed(st.session_state.history[-30:])):
+                q = t.get("question", "")
+                when = t.get("ts", "")
+                st.markdown(f"**{len(st.session_state.history) - i}.** {q[:60]}{'…' if len(q) > 60 else ''}")
+                if when:
+                    st.caption(when)
+        else:
+            st.caption("Hozircha tarix bo'sh.")
+        if st.button("🗑️ Tarixni tozalash", use_container_width=True, key="clear_history_btn"):
+            clear_history()
+            st.rerun()
+
 if ADMIN_MODE:
     st.info("🔧 **Admin rejim yoqilgan** — barcha oraliq bosqichlar sizga ko'rinadi.")
-
-with st.sidebar:
-    st.header("📋 Tarix")
-    if st.session_state.history:
-        st.caption(f"{len(st.session_state.history)} ta suhbat saqlangan (telefon xotirasida).")
-        for i, t in enumerate(reversed(st.session_state.history[-30:])):
-            q = t.get("question", "")
-            when = t.get("ts", "")
-            st.markdown(f"**{len(st.session_state.history) - i}.** {q[:60]}{'…' if len(q) > 60 else ''}")
-            if when:
-                st.caption(when)
-    else:
-        st.caption("Hozircha tarix bo'sh.")
-    if st.button("🗑️ Tarixni tozalash", use_container_width=True):
-        clear_history()
-        st.rerun()
+elif not is_unlocked():
+    _remaining = max(0, FREE_LIMIT - get_usage_count())
+    if _remaining > 0:
+        st.caption(f"🎁 Bepul so'rovlar qoldi: **{_remaining} / {FREE_LIMIT}**")
 
 tab_chat, tab_contract, tab_penya = st.tabs(
     ["💬 Suhbat", "📄 Shartnoma tahlili", "🧮 Penya kalkulyatori"]
@@ -610,6 +706,8 @@ with tab_chat:
     question = st.chat_input("Savolingizni yozing (masalan: 239-modda nima haqida?)")
 
     if question:
+        if not rate_limit_gate("chat"):
+            st.stop()
         with st.chat_message("user"):
             st.write(question)
         with st.chat_message("assistant"):
@@ -640,6 +738,7 @@ with tab_chat:
         if turn is not None:
             st.session_state.history.append(turn)
             save_history(st.session_state.history)
+            increment_usage()
 
 
 # ---- Contract analysis tab ------------------------------------------------
@@ -653,6 +752,8 @@ with tab_contract:
     pasted = st.text_area("…yoki matnni bevosita joylashtiring", height=180, placeholder="Shartnoma matni…")
 
     if st.button("🔍 Tahlil qilish", type="primary"):
+        if not rate_limit_gate("contract"):
+            st.stop()
         text = ""
         try:
             if up is not None:
@@ -679,6 +780,7 @@ with tab_contract:
                         result = analyze_contract(text)
                         s.update(label="✅ Tahlil tayyor", state="complete", expanded=ADMIN_MODE)
                     st.markdown(result)
+                    increment_usage()
                 except Exception as e:
                     st.error(
                         f"❌ Tahlil bajarilmadi — LLM provider javob bermadi.\n\n"
@@ -721,6 +823,10 @@ with tab_penya:
 
 
 st.divider()
+st.markdown(
+    f"💬 **Muammo bo'lsa bog'laning:** "
+    f"[{ADMIN_EMAIL}]({_mailto('Legal-Multiagent — muammo/taklif')})"
+)
 st.caption(
     "⚠️ Bu vosita huquqiy ma'lumot beradi, yuridik maslahat emas. "
     "Muhim qarorlar uchun advokatga murojaat qiling."
