@@ -45,7 +45,7 @@ st.set_page_config(
     page_title="Multi-Agent Legal Analyst",
     page_icon="⚖️",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
 
@@ -247,6 +247,7 @@ class AgentState(TypedDict):
     answer: str
     steps: List[str]
     citations: List[str]
+    difficulty: str
 
 
 class Route(BaseModel):
@@ -254,6 +255,15 @@ class Route(BaseModel):
 
 
 def supervisor(state):
+    difficulty = state.get("difficulty") or "orta"
+
+    # Fast path: on "oson", never call an extra LLM for routing — retriever
+    # once, then finish. This cuts a full LLM roundtrip and answers ~2× faster.
+    if difficulty == "oson":
+        if not state.get("documents"):
+            return {"plan": "retriever", "steps": state["steps"] + ["supervisor→retriever (oson)"]}
+        return {"plan": "finish", "steps": state["steps"] + ["supervisor→finish (oson)"]}
+
     llm_flash, _, _ = get_llms_and_embeddings()
     prompt = f"""Savol: {state['question']}
 Bajarilgan qadamlar: {state['steps']}
@@ -366,6 +376,19 @@ def generate(state):
     _, llm_lite, _ = get_llms_and_embeddings()
     context = "\n\n".join(state["documents"]) if state["documents"] else "(hujjat topilmadi)"
     code_part = f"\nHisoblash natijasi: {state['code_result']}" if state["code_result"] else ""
+    difficulty = state.get("difficulty") or "orta"
+
+    if difficulty == "oson":
+        style = ("Juda qisqa, 2-4 jumla. Faqat asosiy javob, ortiqcha izohsiz. "
+                 "Modda raqamini qavs ichida ber.")
+    elif difficulty == "qiyin":
+        style = ("Chuqur va batafsil javob yoz. Har bir tezisga modda raqamini "
+                 "havola qil, doktrinal izohlar, poydevorli asoslash, muqobil "
+                 "talqinlar bo'lsa keltir. Kerak bo'lsa bo'limlarga bo'l.")
+    else:
+        style = ("Aniq, tartibli, o'rtacha uzunlikda javob. Har bir tezisga "
+                 "modda raqamini havola qil.")
+
     prompt = f"""Sen O'zbekiston fuqarolik huquqi va fuqarolik protsessual huquqi
 bo'yicha yordamchisan. FAQAT quyidagi kontekst asosida javob ber.
 
@@ -375,10 +398,10 @@ Kontekst:
 {context}
 {code_part}
 
-Aniq, qisqa, tartibli javob yoz. Har bir tezisda modda raqamiga havola qil.
+Javob uslubi: {style}
 Hisoblash natijasi bo'lsa, uni javobga aniq kiritib ko'rsat."""
     answer = llm_lite.invoke(prompt).content
-    return {"answer": answer, "steps": state["steps"] + ["generate"]}
+    return {"answer": answer, "steps": state["steps"] + [f"generate ({difficulty})"]}
 
 
 def build_graph():
@@ -419,14 +442,23 @@ THINKING_PHRASES = itertools.cycle([
 ])
 
 
-def run_graph_streaming(question: str):
+DIFFICULTY_PROFILES = {
+    "oson":  {"recursion": 4,  "label": "🐇 Oson (tez, sodda)"},
+    "orta":  {"recursion": 10, "label": "🐢 O'rta (balansli)"},
+    "qiyin": {"recursion": 20, "label": "🦉 Qiyin (chuqur tahlil)"},
+}
+
+
+def run_graph_streaming(question: str, difficulty: str = "orta"):
+    profile = DIFFICULTY_PROFILES.get(difficulty, DIFFICULTY_PROFILES["orta"])
     initial = {
         "question": question, "plan": "", "documents": [],
         "code_result": None, "answer": "", "steps": [], "citations": [],
     }
+    initial["difficulty"] = difficulty
     accumulated = dict(initial)
-    with st.status("🧠 Fikrlanmoqda…", expanded=ADMIN_MODE) as status:
-        for chunk in build_graph().stream(initial, {"recursion_limit": 15}):
+    with st.status(f"🧠 Fikrlanmoqda… ({profile['label']})", expanded=ADMIN_MODE) as status:
+        for chunk in build_graph().stream(initial, {"recursion_limit": profile["recursion"]}):
             for node_name, node_update in chunk.items():
                 for k, v in (node_update or {}).items():
                     accumulated[k] = v
@@ -499,13 +531,92 @@ if "history" not in st.session_state:
 
 
 # ---------------------------------------------------------------------------
-# Free-tier rate limit (per-device via localStorage)
+# Auth (Google) — Streamlit 1.42+ has built-in OIDC via st.login/st.user.
+# Also, per-device fingerprint (canvas + WebGL + screen + timezone hash) so
+# that a returning anonymous device is at least recognized as "the same one".
 # ---------------------------------------------------------------------------
 FREE_LIMIT = int(_get_secret("FREE_LIMIT") or "5")
 ADMIN_EMAIL = _get_secret("ADMIN_EMAIL") or "bunyodpanjiyev48@gmail.com"
 _ACCESS_CODES = {c.strip() for c in (_get_secret("ACCESS_CODES") or "").split(",") if c.strip()}
 _COUNTER_KEY = "legal_request_count_v1"
 _UNLOCK_KEY = "legal_unlocked_v1"
+
+try:
+    from streamlit_javascript import st_javascript
+    _JS_OK = True
+except Exception:
+    _JS_OK = False
+
+
+def get_fingerprint() -> str:
+    """Canvas+WebGL+screen+timezone+userAgent → SHA-256. None on first pass."""
+    if st.session_state.get("_fp"):
+        return st.session_state["_fp"]
+    if not _JS_OK:
+        return ""
+    fp = st_javascript(
+        """(async () => {
+            try {
+              const c = document.createElement('canvas');
+              const g = c.getContext('2d');
+              g.textBaseline = 'top';
+              g.font = "14px 'Arial'";
+              g.fillStyle = '#f60';
+              g.fillRect(125, 1, 62, 20);
+              g.fillStyle = '#069';
+              g.fillText('legal-multiagent', 2, 15);
+              const gl = document.createElement('canvas').getContext('webgl');
+              const glInfo = gl ? (gl.getParameter(gl.VERSION) + '|' + gl.getParameter(gl.RENDERER)) : '';
+              const parts = [
+                c.toDataURL(),
+                glInfo,
+                navigator.userAgent,
+                screen.width + 'x' + screen.height + 'x' + screen.colorDepth,
+                Intl.DateTimeFormat().resolvedOptions().timeZone,
+                navigator.language,
+                (navigator.languages || []).join(','),
+                navigator.hardwareConcurrency || 0,
+                navigator.platform || '',
+                navigator.maxTouchPoints || 0,
+              ].join('|');
+              const buf = new TextEncoder().encode(parts);
+              const hash = await crypto.subtle.digest('SHA-256', buf);
+              return Array.from(new Uint8Array(hash))
+                .map(b => b.toString(16).padStart(2, '0')).join('');
+            } catch (e) { return 'err_' + (e && e.message || 'x'); }
+        })()""",
+        key="fp_js",
+    )
+    if fp and isinstance(fp, str) and len(fp) >= 32:
+        st.session_state["_fp"] = fp
+        return fp
+    return ""
+
+
+def is_google_logged_in() -> bool:
+    try:
+        return bool(getattr(st.user, "is_logged_in", False))
+    except Exception:
+        return False
+
+
+def google_auth_configured() -> bool:
+    """True when Streamlit secrets carries the [auth] block for OIDC."""
+    if not hasattr(st, "login"):
+        return False
+    try:
+        return "auth" in st.secrets
+    except Exception:
+        return False
+
+
+def current_user_label() -> str:
+    if is_google_logged_in():
+        try:
+            return f"{st.user.name or ''} <{st.user.email or ''}>".strip()
+        except Exception:
+            return "kirilgan"
+    return ""
 
 
 def get_usage_count() -> int:
@@ -555,19 +666,38 @@ def _mailto(subject: str) -> str:
 
 
 def render_paywall(context: str) -> None:
-    """Show a signup block. Returns nothing; caller must st.stop() after."""
+    """Show login/signup block. Caller must st.stop() after."""
     st.warning(
         f"🔒 **Bepul chegara tugadi** ({FREE_LIMIT} so'rov). Cheksiz foydalanish "
-        f"uchun ro'yxatdan o'ting."
+        f"uchun kiring yoki ro'yxatdan o'ting."
     )
+    if google_auth_configured():
+        st.markdown("#### 🔐 Google orqali kirish")
+        st.caption(
+            "Google akkauntingiz bilan kirasiz — parol yaratish shart emas, "
+            "cheksiz so'rov beriladi."
+        )
+        st.button(
+            "🅶 Google bilan kirish / ro'yxatdan o'tish",
+            type="primary",
+            on_click=lambda: st.login("google"),
+            key=f"login_g_{context}",
+        )
+        st.markdown("---")
+    else:
+        st.info(
+            "ℹ️ Google login hozir sozlanmagan — kirish kodi bilan davom eting "
+            "yoki admin bilan bog'laning."
+        )
+
     _subject = "Legal-Multiagent — kirish kodini so'rayman"
     st.markdown(
-        f"**Ro'yxatdan o'tish:** [{ADMIN_EMAIL}]({_mailto(_subject)}) "
-        "ga xat yozing, sizga kirish kodi yuboriladi."
+        f"**Yoki kirish kodi bilan:** [{ADMIN_EMAIL}]({_mailto(_subject)}) "
+        "ga xat yozing, kod yuboriladi."
     )
     with st.form(f"unlock_{context}"):
         code = st.text_input("Kirish kodi", type="password", placeholder="Sizga yuborilgan kod…")
-        if st.form_submit_button("🔓 Ochish", type="primary"):
+        if st.form_submit_button("🔓 Ochish"):
             if try_unlock(code.strip()):
                 st.success("Kod qabul qilindi. Endi cheksiz foydalanishingiz mumkin.")
                 st.rerun()
@@ -577,7 +707,7 @@ def render_paywall(context: str) -> None:
 
 def rate_limit_gate(context: str) -> bool:
     """Return True if request is allowed. If not, render paywall."""
-    if is_unlocked():
+    if is_google_logged_in() or is_unlocked():
         return True
     if get_usage_count() < FREE_LIMIT:
         return True
@@ -655,29 +785,79 @@ def calc_penya(summa: float, daily_pct: float, days: int) -> dict:
 # ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
-_title_col, _hist_col = st.columns([6, 1])
-with _title_col:
-    st.title("⚖️ Xush kelibsiz!")
-    st.caption("Sizga qanday yordam bera olaman?")
-with _hist_col:
-    st.markdown("&nbsp;")  # vertical spacer to align with title
-    with st.popover("📋 Tarix", use_container_width=True):
-        if st.session_state.history:
-            st.caption(f"{len(st.session_state.history)} ta suhbat — telefon xotirasida.")
-            for i, t in enumerate(reversed(st.session_state.history[-30:])):
-                q = t.get("question", "")
-                when = t.get("ts", "")
-                st.markdown(f"**{len(st.session_state.history) - i}.** {q[:60]}{'…' if len(q) > 60 else ''}")
-                if when:
-                    st.caption(when)
-        else:
-            st.caption("Hozircha tarix bo'sh.")
+# Trigger the fingerprint computation early so it is ready by the time the
+# user submits a request. Value returns on the next rerun.
+_ = get_fingerprint()
+
+# ---------------------------------------------------------------------------
+# Sidebar — ChatGPT/Gemini-style history + auth block, native ← collapse arrow
+# plus a custom ✕ that clicks the same button via JS in one tap.
+# ---------------------------------------------------------------------------
+with st.sidebar:
+    st.markdown(
+        """
+        <style>
+          .close-x {
+            float: right; cursor: pointer; padding: 2px 8px;
+            font-size: 18px; color: #888; user-select: none;
+            border-radius: 6px;
+          }
+          .close-x:hover { color: #000; background: #eee; }
+        </style>
+        <div>
+          <span style='font-weight:600; font-size:18px'>📋 Tarix</span>
+          <span class='close-x' title='Yopish' onclick="
+            const doc = window.parent.document;
+            const nodes = doc.querySelectorAll('button, [role=button]');
+            for (const b of nodes) {
+              const lbl = ((b.getAttribute('aria-label')||'') + ' ' +
+                           (b.getAttribute('data-testid')||'')).toLowerCase();
+              if (lbl.includes('collaps') || lbl.includes('close sidebar')) {
+                b.click(); return;
+              }
+            }
+          ">✕</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if st.session_state.history:
+        st.caption(f"{len(st.session_state.history)} ta suhbat — qurilma xotirasida.")
+        for i, t in enumerate(reversed(st.session_state.history[-30:])):
+            q = t.get("question", "")
+            when = t.get("ts", "")
+            st.markdown(f"**{len(st.session_state.history) - i}.** {q[:55]}{'…' if len(q) > 55 else ''}")
+            if when:
+                st.caption(when)
         if st.button("🗑️ Tarixni tozalash", use_container_width=True, key="clear_history_btn"):
             clear_history()
             st.rerun()
+    else:
+        st.caption("Hozircha tarix bo'sh.")
 
+    st.markdown("---")
+    if is_google_logged_in():
+        st.markdown(f"👤 **{current_user_label()}**")
+        st.button("Chiqish", on_click=lambda: st.logout(), use_container_width=True, key="logout_side")
+    elif google_auth_configured():
+        st.button(
+            "🅶 Google bilan kirish",
+            on_click=lambda: st.login("google"),
+            use_container_width=True,
+            key="login_side",
+            type="primary",
+        )
+    else:
+        st.caption("_(Google login sozlanmagan)_")
+
+st.title("⚖️ Xush kelibsiz!")
+st.caption("Sizga qanday yordam bera olaman?")
+
+# Quota/status chip
 if ADMIN_MODE:
     st.info("🔧 **Admin rejim yoqilgan** — barcha oraliq bosqichlar sizga ko'rinadi.")
+elif is_google_logged_in():
+    st.success(f"👤 {current_user_label()} — cheksiz kirish yoqilgan.")
 elif not is_unlocked():
     _remaining = max(0, FREE_LIMIT - get_usage_count())
     if _remaining > 0:
@@ -696,6 +876,22 @@ with tab_chat:
             st.caption("Manbalar: " + " · ".join(turn["citations"]))
         if ADMIN_MODE and turn.get("steps"):
             st.caption("Bosqichlar: " + " → ".join(turn["steps"]))
+
+    # Difficulty selector — user picks how deep the model should think.
+    _diff_col, _info_col = st.columns([2, 3])
+    with _diff_col:
+        difficulty = st.radio(
+            "Savol qiyinligi",
+            options=["oson", "orta", "qiyin"],
+            format_func=lambda k: DIFFICULTY_PROFILES[k]["label"],
+            index=1, horizontal=True, key="difficulty_radio",
+        )
+    with _info_col:
+        st.caption(
+            "🐇 **Oson** — 1 chaqiruv, qisqa javob (~2-5s). "
+            "🐢 **O'rta** — supervisor + retriever (~10-20s). "
+            "🦉 **Qiyin** — batafsil ko'p-agentli tahlil (~30-60s)."
+        )
 
     for turn in st.session_state.history:
         with st.chat_message("user"):
@@ -721,11 +917,12 @@ with tab_chat:
                         "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
                     }
                 else:
-                    result = run_graph_streaming(question)
+                    result = run_graph_streaming(question, difficulty=difficulty)
                     turn = {
                         "question": question, "answer": result["answer"],
                         "steps": result["steps"], "citations": result.get("citations", []),
                         "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        "difficulty": difficulty,
                     }
                     render_turn(turn)
             except Exception as e:
