@@ -56,8 +56,21 @@ def _get_secret(name: str) -> str:
         return ""
 
 
+# LLM provider config. Priority: Groq (fastest free tier) → OpenRouter → error.
+GROQ_API_KEY = _get_secret("GROQ_API_KEY")
+GROQ_MODEL = _get_secret("GROQ_MODEL") or "llama-3.3-70b-versatile"
+GROQ_BASE = "https://api.groq.com/openai/v1"
+
 OPENROUTER_API_KEY = _get_secret("OPENROUTER_API_KEY")
-OPENROUTER_MODEL = _get_secret("OPENROUTER_MODEL") or "deepseek/deepseek-chat-v3.1:free"
+# Comma-separated fallback list. OpenRouter frequently demotes ":free" slugs,
+# so we try one, catch the 404, and roll to the next.
+OPENROUTER_MODELS = [
+    m.strip() for m in (
+        _get_secret("OPENROUTER_MODEL")
+        or "deepseek/deepseek-chat-v3.1:free,google/gemini-2.0-flash-exp:free,"
+           "qwen/qwen-2.5-72b-instruct:free,mistralai/mistral-small-3.2-24b-instruct:free"
+    ).split(",") if m.strip()
+]
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
 TAVILY_API_KEY = _get_secret("TAVILY_API_KEY")
@@ -75,29 +88,58 @@ try:
 except Exception:
     ADMIN_MODE = False
 
-if not OPENROUTER_API_KEY:
+if not (GROQ_API_KEY or OPENROUTER_API_KEY):
     st.error(
-        "OPENROUTER_API_KEY topilmadi. https://openrouter.ai/keys "
-        "dan bepul kalit oling va Streamlit Cloud'da Settings → Secrets bo'limiga qo'shing."
+        "GROQ_API_KEY yoki OPENROUTER_API_KEY topilmadi. "
+        "Bepul Groq kaliti: https://console.groq.com/keys — Streamlit Cloud "
+        "Settings → Secrets bo'limiga qo'shing."
     )
     st.stop()
 
 
-# ---------------------------------------------------------------------------
-# LLM + embeddings (cached)
-# ---------------------------------------------------------------------------
+class ResilientLLM:
+    """LLM wrapper: prefer Groq; on 404/rate-limit fall through OpenRouter list."""
+
+    def __init__(self):
+        self._llms = self._build_chain()
+
+    def _build_chain(self):
+        chain = []
+        if GROQ_API_KEY:
+            chain.append(("groq:" + GROQ_MODEL, ChatOpenAI(
+                api_key=GROQ_API_KEY, base_url=GROQ_BASE,
+                model=GROQ_MODEL, temperature=0,
+            )))
+        if OPENROUTER_API_KEY:
+            for m in OPENROUTER_MODELS:
+                chain.append(("openrouter:" + m, ChatOpenAI(
+                    api_key=OPENROUTER_API_KEY, base_url=OPENROUTER_BASE,
+                    model=m, temperature=0,
+                    default_headers={
+                        "HTTP-Referer": "https://legal-multiagent.streamlit.app",
+                        "X-Title": "Multi-Agent Legal Analyst",
+                    },
+                )))
+        return chain
+
+    def invoke(self, *args, **kwargs):
+        last_err = None
+        for tag, llm in self._llms:
+            try:
+                return llm.invoke(*args, **kwargs)
+            except Exception as e:
+                last_err = e
+                msg = str(e).lower()
+                # 404/unavailable/rate limit — try next model in chain.
+                if any(k in msg for k in ("404", "not found", "unavailable", "rate", "429")):
+                    continue
+                raise
+        raise last_err if last_err else RuntimeError("Barcha LLM providerlar javob bermadi")
+
+
 @st.cache_resource(show_spinner=False)
 def get_llms_and_embeddings():
-    llm = ChatOpenAI(
-        api_key=OPENROUTER_API_KEY,
-        base_url=OPENROUTER_BASE,
-        model=OPENROUTER_MODEL,
-        temperature=0,
-        default_headers={
-            "HTTP-Referer": "https://legal-multiagent.streamlit.app",
-            "X-Title": "Multi-Agent Legal Analyst",
-        },
-    )
+    llm = ResilientLLM()
     embeddings = FastEmbedEmbeddings(model_name=EMBED_MODEL)
     return llm, llm, embeddings
 
