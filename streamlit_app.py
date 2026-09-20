@@ -67,12 +67,15 @@ OPENROUTER_API_KEY = _get_secret("OPENROUTER_API_KEY")
 OPENROUTER_MODELS = [
     m.strip() for m in (
         _get_secret("OPENROUTER_MODEL")
-        or "nvidia/nemotron-3-ultra-550b-a55b:free,"
-           "nvidia/nemotron-nano-9b-v2:free,"
+        # Order: fastest small model first, then medium, then large as final fallback.
+        or "nvidia/nemotron-nano-9b-v2:free,"
+           "google/gemini-2.0-flash-exp:free,"
            "deepseek/deepseek-chat-v3.1:free,"
-           "google/gemini-2.0-flash-exp:free"
+           "nvidia/nemotron-3-ultra-550b-a55b:free"
     ).split(",") if m.strip()
 ]
+# Per-request timeout (seconds). Slow/hung models roll to the next in chain.
+LLM_TIMEOUT = int(_get_secret("LLM_TIMEOUT") or "30")
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
 TAVILY_API_KEY = _get_secret("TAVILY_API_KEY")
@@ -110,13 +113,13 @@ class ResilientLLM:
         if GROQ_API_KEY:
             chain.append(("groq:" + GROQ_MODEL, ChatOpenAI(
                 api_key=GROQ_API_KEY, base_url=GROQ_BASE,
-                model=GROQ_MODEL, temperature=0,
+                model=GROQ_MODEL, temperature=0, timeout=LLM_TIMEOUT, max_retries=1,
             )))
         if OPENROUTER_API_KEY:
             for m in OPENROUTER_MODELS:
                 chain.append(("openrouter:" + m, ChatOpenAI(
                     api_key=OPENROUTER_API_KEY, base_url=OPENROUTER_BASE,
-                    model=m, temperature=0,
+                    model=m, temperature=0, timeout=LLM_TIMEOUT, max_retries=1,
                     default_headers={
                         "HTTP-Referer": "https://legal-multiagent.streamlit.app",
                         "X-Title": "Multi-Agent Legal Analyst",
@@ -132,8 +135,11 @@ class ResilientLLM:
             except Exception as e:
                 last_err = e
                 msg = str(e).lower()
-                # 404/unavailable/rate limit — try next model in chain.
-                if any(k in msg for k in ("404", "not found", "unavailable", "rate", "429")):
+                # 404 / unavailable / rate limit / timeout — try next model.
+                if any(k in msg for k in (
+                    "404", "not found", "unavailable", "rate", "429",
+                    "timeout", "timed out", "connection", "502", "503", "504",
+                )):
                     continue
                 raise
         raise last_err if last_err else RuntimeError("Barcha LLM providerlar javob bermadi")
