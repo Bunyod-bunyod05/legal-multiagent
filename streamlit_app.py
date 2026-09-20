@@ -135,21 +135,19 @@ class ResilientLLM:
         return chain
 
     def invoke(self, *args, **kwargs):
-        last_err = None
+        errors = []
         for tag, llm in self._llms:
             try:
                 return llm.invoke(*args, **kwargs)
             except Exception as e:
-                last_err = e
-                msg = str(e).lower()
-                # 404 / unavailable / rate limit / timeout — try next model.
-                if any(k in msg for k in (
-                    "404", "not found", "unavailable", "rate", "429",
-                    "timeout", "timed out", "connection", "502", "503", "504",
-                )):
-                    continue
-                raise
-        raise last_err if last_err else RuntimeError("Barcha LLM providerlar javob bermadi")
+                errors.append(f"{tag}: {type(e).__name__}: {str(e)[:200]}")
+                # Any error → try next provider. The chain is our resilience.
+                continue
+        raise RuntimeError(
+            "Barcha LLM providerlar javob bermadi. Iltimos, biroz kutib qayta "
+            "urinib ko'ring yoki GROQ_API_KEY qo'shing. Xatolar:\n- "
+            + "\n- ".join(errors)
+        )
 
 
 @st.cache_resource(show_spinner=False)
@@ -598,23 +596,33 @@ with tab_chat:
         with st.chat_message("user"):
             st.write(question)
         with st.chat_message("assistant"):
-            if not in_scope(question):
-                st.write(SCOPE_REFUSAL)
-                turn = {
-                    "question": question, "answer": SCOPE_REFUSAL,
-                    "steps": ["scope→refused"], "citations": [],
-                    "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                }
-            else:
-                result = run_graph_streaming(question)
-                turn = {
-                    "question": question, "answer": result["answer"],
-                    "steps": result["steps"], "citations": result.get("citations", []),
-                    "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                }
-                render_turn(turn)
-        st.session_state.history.append(turn)
-        save_history(st.session_state.history)
+            turn = None
+            try:
+                if not in_scope(question):
+                    st.write(SCOPE_REFUSAL)
+                    turn = {
+                        "question": question, "answer": SCOPE_REFUSAL,
+                        "steps": ["scope→refused"], "citations": [],
+                        "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    }
+                else:
+                    result = run_graph_streaming(question)
+                    turn = {
+                        "question": question, "answer": result["answer"],
+                        "steps": result["steps"], "citations": result.get("citations", []),
+                        "ts": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    }
+                    render_turn(turn)
+            except Exception as e:
+                st.error(
+                    f"❌ Javob olinmadi — LLM provider javob bermadi.\n\n"
+                    f"**Iltimos:** biroz kutib qayta urinib ko'ring yoki Groq "
+                    f"kalitini qo'shing (https://console.groq.com/keys).\n\n"
+                    f"Texnik xato: `{type(e).__name__}: {str(e)[:400]}`"
+                )
+        if turn is not None:
+            st.session_state.history.append(turn)
+            save_history(st.session_state.history)
 
 
 # ---- Contract analysis tab ------------------------------------------------
@@ -647,12 +655,20 @@ with tab_contract:
             if len(text.strip()) < 100:
                 st.warning("Matn juda qisqa. Skanerlangan PDF bo'lsa, undagi rasmlardan matn olinmaydi — matnli PDF bering.")
             else:
-                with st.status("📄 Shartnoma o'qilmoqda va tahlil qilinmoqda…", expanded=ADMIN_MODE) as s:
-                    if ADMIN_MODE:
-                        st.caption(f"belgi soni: {len(text)}")
-                    result = analyze_contract(text)
-                    s.update(label="✅ Tahlil tayyor", state="complete", expanded=ADMIN_MODE)
-                st.markdown(result)
+                try:
+                    with st.status("📄 Shartnoma o'qilmoqda va tahlil qilinmoqda…", expanded=ADMIN_MODE) as s:
+                        if ADMIN_MODE:
+                            st.caption(f"belgi soni: {len(text)}")
+                        result = analyze_contract(text)
+                        s.update(label="✅ Tahlil tayyor", state="complete", expanded=ADMIN_MODE)
+                    st.markdown(result)
+                except Exception as e:
+                    st.error(
+                        f"❌ Tahlil bajarilmadi — LLM provider javob bermadi.\n\n"
+                        f"**Iltimos:** biroz kutib qayta urinib ko'ring yoki Groq "
+                        f"kalitini qo'shing (https://console.groq.com/keys).\n\n"
+                        f"Texnik xato: `{type(e).__name__}: {str(e)[:400]}`"
+                    )
 
 
 # ---- Penya calculator tab -------------------------------------------------
