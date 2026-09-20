@@ -21,7 +21,7 @@ from typing import TypedDict, List, Optional
 
 import streamlit as st
 from pydantic import BaseModel, Field
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_qdrant import QdrantVectorStore
 from langchain_community.tools.tavily_search import TavilySearchResults
 from langgraph.graph import StateGraph, END
@@ -31,7 +31,6 @@ from civil_code import (
     COLLECTION_NAME,
     EMBED_BATCH,
     EMBED_MODEL,
-    PROXY_BASE_URL,
     VECTOR_SIZE,
     article_keys_in,
     embed_corpus,
@@ -76,20 +75,16 @@ if not GEMINI_API_KEY:
 
 @st.cache_resource(show_spinner=False)
 def get_llms_and_embeddings():
-    # The proxy key is scoped to ['flash-lite', 'gemini-flash-lite', 'gemini-embedding'].
-    # Asking for "gemini-flash" comes back as 403 key_model_access_denied, which
-    # killed the supervisor node — the graph's entry point — on every question.
-    llm_flash = ChatOpenAI(
-        base_url=PROXY_BASE_URL, api_key=GEMINI_API_KEY, model="gemini-flash-lite", temperature=0,
+    # Direct Gemini API — no proxy needed. gemini-2.0-flash-lite is free-tier
+    # friendly and fast enough for both supervisor routing and generation.
+    llm_flash = ChatGoogleGenerativeAI(
+        google_api_key=GEMINI_API_KEY, model="gemini-2.0-flash-lite", temperature=0,
     )
-    llm_lite = ChatOpenAI(
-        base_url=PROXY_BASE_URL, api_key=GEMINI_API_KEY, model="gemini-flash-lite", temperature=0,
+    llm_lite = ChatGoogleGenerativeAI(
+        google_api_key=GEMINI_API_KEY, model="gemini-2.0-flash-lite", temperature=0,
     )
-    # chunk_size must stay at or below Gemini's 100-input batch limit — see
-    # EMBED_BATCH. The library default of 1000 fails with a 400 and then retries.
-    embeddings = OpenAIEmbeddings(
-        base_url=PROXY_BASE_URL, api_key=GEMINI_API_KEY, model=EMBED_MODEL,
-        chunk_size=EMBED_BATCH,
+    embeddings = GoogleGenerativeAIEmbeddings(
+        google_api_key=GEMINI_API_KEY, model=EMBED_MODEL,
     )
     return llm_flash, llm_lite, embeddings
 

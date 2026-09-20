@@ -18,7 +18,7 @@ import sys
 from collections import Counter
 
 from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient, models
 
@@ -29,7 +29,6 @@ from civil_code import (
     EMBED_BATCH,
     EMBED_MODEL,
     PDF_PARTS,
-    PROXY_BASE_URL,
     VECTOR_SIZE,
     legal_chunk,
     load_pdf_text,
@@ -97,9 +96,8 @@ def main() -> int:
     store = QdrantVectorStore(
         client=client,
         collection_name=COLLECTION_NAME,
-        embedding=OpenAIEmbeddings(
-            base_url=PROXY_BASE_URL, api_key=gemini_key,
-            model=EMBED_MODEL, chunk_size=EMBED_BATCH,
+        embedding=GoogleGenerativeAIEmbeddings(
+            google_api_key=gemini_key, model=EMBED_MODEL,
         ),
     )
 
