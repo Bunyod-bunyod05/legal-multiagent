@@ -502,23 +502,40 @@ def extract_pdf_text(file_bytes: bytes) -> str:
 
 
 def analyze_contract(text: str) -> str:
-    """Send extracted contract text to LLM with a civil-code-aware prompt."""
+    """Contract risk review — only risky clauses + recommendations."""
     llm, _, _ = get_llms_and_embeddings()
     text = text.strip()
     if len(text) > 15000:
         text = text[:15000] + "\n\n[...matn qisqartirildi...]"
-    prompt = f"""Sen O'zbekiston fuqarolik huquqi bo'yicha shartnoma tahlilchisi.
-Quyidagi shartnoma matnini tahlil qil. Fuqarolik kodeksining tegishli
-moddalariga havola qilib, quyidagi tuzilmada javob yoz:
+    prompt = f"""Sen O'zbekiston fuqarolik huquqi bo'yicha shartnoma
+tahlilchisisan. Quyidagi shartnomani o'qib, FAQAT ikkita bo'lim yoz — boshqa
+hech narsa qo'shma (kirish, xulosa, shartnoma turi, tomonlar — bularning
+hech biri kerak emas).
 
-1. **Shartnoma turi** (masalan: xarid-sotuv, ijara, pudrat) — FK bo'yicha qanday
-   institutga tegishli, tegishli moddalar.
-2. **Tomonlar** — kim va kim, huquqiy shakli.
-3. **Predmet va asosiy shartlar** — qisqacha.
-4. **Muhim shartlar (essentialia negotii)** — FK talab qiladigan, lekin
-   shartnomada YO'Q bo'lgan shartlarni sanab bering.
-5. **Xatarli qoidalar** — foydalanuvchi uchun noqulay yoki FK'ga zid bandlar.
-6. **Tavsiyalar** — nimalarni qo'shish/o'zgartirish kerak.
+## MUHIM TIL QOIDALARI
+- Sof, ravon o'zbek tilida yoz. Rus/ingliz kalka tarjimalarini ishlatma.
+- Anglashilmovchilikka olib keladigan so'zlarni ishlatma. Masalan, "rounding"
+  (qoldiqni yuqoriga tenglashtirish) ni "yuvarlash" deb tarjima qilma —
+  "pul yuvish" bilan aralashib ketadi. O'rniga: "qoldiqni tenglashtirish"
+  yoki "summani butunlashtirish".
+- Aniqlik: har xavfli banddan keyin "chunki [aniq sabab]" deb yoz.
+- Iqtibos: FK moddasi raqamini qavs ichida ko'rsat (masalan: "(FK 374-modda)").
+  Modda mavjudligini bilmasang — havolani umuman berma, "FK ning tegishli
+  moddasi bo'yicha" deb yoz.
+- Ortiqcha jargon, takrorlash va so'z o'yinini kesib tashla.
+
+## 1. Xatarli bandlar
+Foydalanuvchi (mijoz/fuqaro) uchun noqulay yoki FK'ga zid bandlarni sanab
+ber. Har biri uchun:
+- **Band raqami va qisqacha mazmuni** (bir jumla)
+- **Nima xavfli** (bir-ikki jumla, aniq oqibat bilan)
+- **Huquqiy asos** (FK moddasi, bilsang)
+
+Format: har band alohida qism sifatida, raqamlangan.
+
+## 2. Tavsiyalar
+Har bir xatarli band uchun aniq nima o'zgartirish yoki qo'shish kerak.
+Format: raqamlangan ro'yxat, bir tavsiya bir jumla.
 
 Shartnoma matni:
 {text}"""
