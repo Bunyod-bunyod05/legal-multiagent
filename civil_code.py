@@ -3,13 +3,8 @@
 Kept free of Streamlit imports so ingest.py (and tests) can use it without
 starting a script run.
 """
-import json
 import os
 import re
-import time
-import urllib.error
-import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from typing import List
 
 import fitz
@@ -21,10 +16,11 @@ PDF_PARTS = [
 ]
 
 COLLECTION_NAME = "civil_code"
-# Google's text-embedding-004 model (used via langchain-google-genai).
-EMBED_MODEL = "models/text-embedding-004"
-VECTOR_SIZE = 768
-EMBED_BATCH = 100
+# Local, free, multilingual embeddings via fastembed. Handles Uzbek/Russian
+# well and runs entirely on CPU, so no API key or quota is needed.
+EMBED_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+VECTOR_SIZE = 384
+EMBED_BATCH = 64
 
 SUP_CHARS = "⁰¹²³⁴⁵⁶⁷⁸⁹"
 SUP_MAP = str.maketrans("0123456789", SUP_CHARS)
@@ -142,51 +138,13 @@ def article_keys_in(question: str) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
-# Embedding the corpus
+# Embedding the corpus (fastembed, local ONNX inference — no API key needed)
 # ---------------------------------------------------------------------------
-EMBED_WORKERS = 5
 
 
-def _embed_batch_google(texts: List[str], api_key: str, attempts: int = 3) -> List[List[float]]:
-    """Embed a batch via the Google Generative AI REST endpoint directly."""
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/{EMBED_MODEL}:batchEmbedContents"
-        f"?key={api_key}"
-    )
-    requests_body = [
-        {"model": EMBED_MODEL, "content": {"parts": [{"text": t}]}}
-        for t in texts
-    ]
-    payload = json.dumps({"requests": requests_body}).encode()
-    last = None
-    for attempt in range(attempts):
-        req = urllib.request.Request(
-            url,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=180) as resp:
-                data = json.load(resp)
-            return [e["values"] for e in data["embeddings"]]
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode()[:200]
-            last = RuntimeError(f"embed HTTP {exc.code}: {body}")
-            if exc.code < 500 and exc.code != 429:
-                raise last
-        except Exception as exc:
-            last = exc
-        time.sleep(2 * (attempt + 1))
-    raise last
+def embed_corpus(texts: List[str]) -> List[List[float]]:
+    """Embed every article locally via fastembed. Multilingual, free, offline."""
+    from fastembed import TextEmbedding
 
-
-def embed_corpus(texts: List[str], api_key: str,
-                 workers: int = EMBED_WORKERS) -> List[List[float]]:
-    """Embed every article, running EMBED_BATCH-sized requests concurrently.
-
-    Uses the Google Generative AI batchEmbedContents endpoint directly.
-    """
-    batches = [texts[i:i + EMBED_BATCH] for i in range(0, len(texts), EMBED_BATCH)]
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        results = list(pool.map(lambda b: _embed_batch_google(b, api_key), batches))
-    return [vec for batch in results for vec in batch]
+    model = TextEmbedding(model_name=EMBED_MODEL)
+    return [list(v) for v in model.embed(texts, batch_size=EMBED_BATCH)]

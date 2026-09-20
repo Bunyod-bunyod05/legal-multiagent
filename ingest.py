@@ -18,7 +18,7 @@ import sys
 from collections import Counter
 
 from langchain_core.documents import Document
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_community.embeddings import FastEmbedEmbeddings
 from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient, models
 
@@ -55,11 +55,10 @@ def main() -> int:
                     help="kolleksiyani o'chirib qaytadan yaratish")
     args = ap.parse_args()
 
-    gemini_key = os.environ.get("GEMINI_API_KEY", "")
     qdrant_url = os.environ.get("QDRANT_URL", "")
     qdrant_key = os.environ.get("QDRANT_API_KEY", "")
-    if not gemini_key or not qdrant_url:
-        print("GEMINI_API_KEY va QDRANT_URL environment o'zgaruvchilari kerak.")
+    if not qdrant_url:
+        print("QDRANT_URL environment o'zgaruvchisi kerak.")
         return 1
 
     print("Chunking...")
@@ -96,9 +95,7 @@ def main() -> int:
     store = QdrantVectorStore(
         client=client,
         collection_name=COLLECTION_NAME,
-        embedding=GoogleGenerativeAIEmbeddings(
-            google_api_key=gemini_key, model=EMBED_MODEL,
-        ),
+        embedding=FastEmbedEmbeddings(model_name=EMBED_MODEL),
     )
 
     docs = [
